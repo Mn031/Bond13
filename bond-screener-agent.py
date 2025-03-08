@@ -168,4 +168,220 @@ class BondScreenerAgent:
     
     def _get_company_summary(self, company_name: str) -> Dict[str, Any]:
         """Get summary for a specific company"""
-        #
+        return self._get_cash_flow_schedule(isin)
+        
+        # If no specific pattern matches, provide general help
+        return {
+            'response_type': 'general_help',
+            'message': (
+                "I can help you find information about bonds in our directory. "
+                "You can ask about specific ISINs, issuers, filter bonds by criteria, "
+                "check maturity dates, or get cash flow schedules. For example:\n\n"
+                "- 'Show me details for ISIN INE123456789'\n"
+                "- 'Show me all issuances by Ugro Capital'\n"
+                "- 'Find secured debentures with coupon rate above 10% and maturity after 2026'\n"
+                "- 'Which bonds are maturing in 2025?'\n"
+                "- 'Show me the cash flow schedule for ISIN INE567890123'"
+            )
+        }
+    
+    def _get_isin_details(self, isin: str) -> Dict[str, Any]:
+        """Get details for a specific ISIN"""
+        bond = self.bonds_db[self.bonds_db['isin'] == isin]
+        
+        if bond.empty:
+            return {
+                'response_type': 'error',
+                'message': self.response_templates['error_isin_not_found'].format(isin=isin)
+            }
+        
+        bond_data = bond.iloc[0].to_dict()
+        
+        return {
+            'response_type': 'isin_details',
+            'isin': isin,
+            'message': self.response_templates['isin_details'].format(
+                isin=isin,
+                issuer=bond_data.get('issuer_name', 'N/A'),
+                issuer_type=bond_data.get('issuer_type', 'N/A'),
+                sector=bond_data.get('sector', 'N/A'),
+                coupon_rate=bond_data.get('coupon_rate', 'N/A'),
+                instrument_name=bond_data.get('instrument_name', 'N/A'),
+                face_value=bond_data.get('face_value', 'N/A'),
+                issue_size=bond_data.get('issue_size', 'N/A'),
+                redemption_date=bond_data.get('redemption_date', 'N/A'),
+                credit_rating=bond_data.get('credit_rating', 'N/A'),
+                listing_details=bond_data.get('listing_details', 'N/A'),
+                documents=bond_data.get('key_documents', 'N/A')
+            ),
+            'data': bond_data
+        }
+    
+    def _get_issuer_issuances(self, issuer: str) -> Dict[str, Any]:
+        """Get all issuances by a specific issuer"""
+        bonds = self.bonds_db[self.bonds_db['issuer_name'].str.contains(issuer, case=False, na=False)]
+        
+        if bonds.empty:
+            return {
+                'response_type': 'error',
+                'message': self.response_templates['error_issuer_not_found'].format(issuer=issuer)
+            }
+        
+        total_bonds = len(bonds)
+        active_bonds = len(bonds[bonds['status'] == 'Active'])
+        matured_bonds = total_bonds - active_bonds
+        
+        # Create table of ISINs
+        isins_table = ""
+        for _, bond in bonds.iterrows():
+            isins_table += f"{bond['isin']} | {bond['coupon_rate']}% | {bond['redemption_date']} | ₹{bond['face_value']} | {bond['credit_rating']} | {bond['issue_size']} cr\n"
+        
+        return {
+            'response_type': 'issuer_issuances',
+            'issuer': issuer,
+            'message': self.response_templates['issuer_issuances'].format(
+                issuer=issuer,
+                total_bonds=total_bonds,
+                active_bonds=active_bonds,
+                matured_bonds=matured_bonds,
+                isins_table=isins_table
+            ),
+            'data': bonds.to_dict('records')
+        }
+    
+    def _filter_bonds(self, query: str) -> Dict[str, Any]:
+        """Filter bonds based on query criteria"""
+        filtered_bonds = self.bonds_db.copy()
+        
+        # Apply filters based on query
+        if re.search(r'secured', query, re.IGNORECASE):
+            filtered_bonds = filtered_bonds[filtered_bonds['security_type'] == 'Secured']
+        
+        if re.search(r'coupon.+above\s+(\d+\.?\d*)%', query, re.IGNORECASE):
+            rate_match = re.search(r'coupon.+above\s+(\d+\.?\d*)%', query, re.IGNORECASE)
+            if rate_match:
+                min_rate = float(rate_match.group(1))
+                filtered_bonds = filtered_bonds[filtered_bonds['coupon_rate'] > min_rate]
+        
+        if re.search(r'maturity.+after\s+(\d{4})', query, re.IGNORECASE):
+            year_match = re.search(r'maturity.+after\s+(\d{4})', query, re.IGNORECASE)
+            if year_match:
+                year = int(year_match.group(1))
+                # Convert redemption_date to datetime for comparison
+                filtered_bonds['redemption_date'] = pd.to_datetime(filtered_bonds['redemption_date'], errors='coerce')
+                filtered_bonds = filtered_bonds[filtered_bonds['redemption_date'].dt.year > year]
+        
+        count = len(filtered_bonds)
+        
+        if count == 0:
+            return {
+                'response_type': 'no_results',
+                'message': "No bonds match your specified criteria."
+            }
+        
+        # Create preview of filtered bonds
+        bonds_preview = ""
+        for _, bond in filtered_bonds.head(5).iterrows():
+            bonds_preview += (
+                f"● ISIN: {bond['isin']}\n"
+                f"● Issuer: {bond['issuer_name']}\n"
+                f"● Coupon Rate: {bond['coupon_rate']}%\n"
+                f"● Redemption Date: {bond['redemption_date']}\n"
+                f"● Security: {bond['security_type']}\n\n"
+            )
+        
+        if count > 5:
+            bonds_preview += f"... and {count - 5} more bonds.\n"
+        
+        return {
+            'response_type': 'filtered_bonds',
+            'count': count,
+            'message': self.response_templates['filtered_bonds'].format(
+                count=count,
+                bonds_preview=bonds_preview
+            ),
+            'data': filtered_bonds.to_dict('records')
+        }
+    
+    def _get_bonds_by_maturity_year(self, year: str) -> Dict[str, Any]:
+        """Get bonds maturing in a specific year"""
+        # Convert redemption_date to datetime for comparison
+        self.bonds_db['redemption_date'] = pd.to_datetime(self.bonds_db['redemption_date'], errors='coerce')
+        maturing_bonds = self.bonds_db[self.bonds_db['redemption_date'].dt.year == int(year)]
+        
+        count = len(maturing_bonds)
+        
+        if count == 0:
+            return {
+                'response_type': 'no_results',
+                'message': f"No bonds found maturing in {year}."
+            }
+        
+        # Create list of maturing bonds
+        bonds_list = ""
+        for _, bond in maturing_bonds.head(10).iterrows():
+            bonds_list += f"● {bond['isin']} | {bond['issuer_name']} | {bond['redemption_date'].strftime('%d-%m-%Y')}\n"
+        
+        if count > 10:
+            bonds_list += f"\n... and {count - 10} more bonds maturing in {year}."
+        
+        return {
+            'response_type': 'maturity_bonds',
+            'year': year,
+            'count': count,
+            'message': f"Found {count} bonds maturing in {year}:\n\n{bonds_list}",
+            'data': maturing_bonds.to_dict('records')
+        }
+    
+    def _get_cash_flow_schedule(self, isin: str) -> Dict[str, Any]:
+        """Get cash flow schedule for a specific ISIN"""
+        # In a real implementation, this would fetch from a cash flow database
+        # For this demo, we'll create a simplified example
+        bond = self.bonds_db[self.bonds_db['isin'] == isin]
+        
+        if bond.empty:
+            return {
+                'response_type': 'error',
+                'message': self.response_templates['error_isin_not_found'].format(isin=isin)
+            }
+        
+        bond_data = bond.iloc[0]
+        
+        # Generate synthetic cash flow schedule based on bond data
+        redemption_date = pd.to_datetime(bond_data['redemption_date'])
+        coupon_rate = bond_data['coupon_rate']
+        
+        # Create cash flow schedule with semi-annual payments
+        schedule = []
+        current_date = redemption_date
+        
+        # Add principal payment
+        schedule.append({
+            'date': current_date.strftime('%d-%m-%Y'),
+            'type': 'Principal + Interest'
+        })
+        
+        # Add interest payments (semi-annual)
+        for i in range(1, 6):  # Up to 3 years of payments
+            current_date = current_date - pd.DateOffset(months=6)
+            if current_date < pd.Timestamp.now():
+                break
+                
+            schedule.append({
+                'date': current_date.strftime('%d-%m-%Y'),
+                'type': 'Interest Payment'
+            })
+        
+        schedule.reverse()  # Sort chronologically
+        
+        # Format the schedule as a table
+        schedule_table = "Date | Type\n-----|-----\n"
+        for payment in schedule:
+            schedule_table += f"{payment['date']} | {payment['type']}\n"
+        
+        return {
+            'response_type': 'cash_flow_schedule',
+            'isin': isin,
+            'message': f"Cash flow schedule for ISIN {isin}:\n\n{schedule_table}",
+            'data': schedule
+        }
