@@ -103,3 +103,162 @@ class BondFinderAgent:
             platforms = self._get_platforms_for_issuer(bond['issuer'])
             yield_range = f"{bond['yield_min']}%-{bond['yield_max']}%"
             bonds_table += f"{bond['issuer']} | {
+            # Format as a table
+        bonds_table = ""
+        for _, bond in sample_bonds.iterrows():
+            platforms = self._get_platforms_for_issuer(bond['issuer'])
+            yield_range = f"{bond['yield_min']}%-{bond['yield_max']}%"
+            bonds_table += f"{bond['issuer']} | {bond['rating']} | {yield_range} | {', '.join(platforms)}\n"
+        
+        return {
+            'response_type': 'general_info',
+            'message': self.response_templates['general_info'].format(bonds_table=bonds_table),
+            'data': sample_bonds.to_dict('records')
+        }
+    
+    def _get_platform_availability(self, issuer: str) -> Dict[str, Any]:
+        """Get platforms where bonds from a specific issuer are available"""
+        issuer_bonds = self.finder_db[self.finder_db['issuer'].str.contains(issuer, case=False, na=False)]
+        
+        if issuer_bonds.empty:
+            return {
+                'response_type': 'error',
+                'message': self.response_templates['error_issuer_not_found'].format(issuer=issuer)
+            }
+        
+        platforms = self._get_platforms_for_issuer(issuer)
+        
+        # Calculate yield range
+        min_yield = issuer_bonds['yield_min'].min()
+        max_yield = issuer_bonds['yield_max'].max()
+        yield_range = f"{min_yield}%-{max_yield}%"
+        
+        return {
+            'response_type': 'platform_availability',
+            'issuer': issuer,
+            'message': self.response_templates['platform_availability'].format(
+                issuer=issuer,
+                platforms=', '.join(platforms),
+                yield_range=yield_range
+            ),
+            'data': {
+                'issuer': issuer,
+                'platforms': platforms,
+                'yield_range': yield_range
+            }
+        }
+    
+    def _get_bonds_by_yield(self, min_yield: float) -> Dict[str, Any]:
+        """Get bonds with yield above a specific threshold"""
+        # Filter bonds with yield_max greater than min_yield
+        high_yield_bonds = self.finder_db[self.finder_db['yield_max'] > min_yield]
+        
+        if high_yield_bonds.empty:
+            return {
+                'response_type': 'no_results',
+                'message': f"No bonds found with yield above {min_yield}%."
+            }
+        
+        # Format as a table
+        bonds_table = ""
+        for _, bond in high_yield_bonds.head(10).iterrows():
+            platforms = self._get_platforms_for_issuer(bond['issuer'])
+            yield_range = f"{bond['yield_min']}%-{bond['yield_max']}%"
+            bonds_table += f"{bond['issuer']} | {bond['rating']} | {yield_range} | {', '.join(platforms)}\n"
+        
+        if len(high_yield_bonds) > 10:
+            bonds_table += f"\n... and {len(high_yield_bonds) - 10} more bonds."
+        
+        return {
+            'response_type': 'yield_based_search',
+            'min_yield': min_yield,
+            'message': self.response_templates['yield_based_search'].format(
+                min_yield=min_yield,
+                bonds_table=bonds_table
+            ),
+            'data': high_yield_bonds.to_dict('records')
+        }
+    
+    def _get_best_yield_comparison(self, term: int = None) -> Dict[str, Any]:
+        """Get platform offering the best yield for a specific term"""
+        filtered_bonds = self.finder_db.copy()
+        
+        # Filter by term if specified
+        if term is not None:
+            # This would require a term/duration column in the database
+            # For now, we'll simulate this filtering
+            filtered_bonds = filtered_bonds[filtered_bonds['term_years'] == term]
+        
+        if filtered_bonds.empty:
+            return {
+                'response_type': 'no_results',
+                'message': f"No bonds found{' for ' + str(term) + '-year term' if term else ''}."
+            }
+        
+        # Find the bond with the highest yield
+        best_bond = filtered_bonds.loc[filtered_bonds['yield_max'].idxmax()]
+        platforms = self._get_platforms_for_issuer(best_bond['issuer'])
+        
+        # Determine which platform has this bond with the highest yield
+        # In a real implementation, this would check yield by platform
+        # For this demo, we'll just use the first platform
+        best_platform = platforms[0] if platforms else "N/A"
+        
+        return {
+            'response_type': 'best_yield_comparison',
+            'term': term,
+            'message': self.response_templates['best_yield_comparison'].format(
+                platform=best_platform,
+                yield_value=best_bond['yield_max'],
+                term=term if term else "all"
+            ),
+            'data': {
+                'platform': best_platform,
+                'issuer': best_bond['issuer'],
+                'yield': best_bond['yield_max'],
+                'term': term
+            }
+        }
+    
+    def _get_bonds_by_rating(self, rating: str) -> Dict[str, Any]:
+        """Get bonds with a specific credit rating"""
+        # Filter bonds by rating
+        # This would handle ratings like "AA+" or "A-"
+        rating_bonds = self.finder_db[self.finder_db['rating'].str.contains(rating, regex=False)]
+        
+        if rating_bonds.empty:
+            return {
+                'response_type': 'no_results',
+                'message': f"No bonds found with rating {rating}."
+            }
+        
+        # Format as a table
+        bonds_table = ""
+        for _, bond in rating_bonds.head(10).iterrows():
+            platforms = self._get_platforms_for_issuer(bond['issuer'])
+            yield_range = f"{bond['yield_min']}%-{bond['yield_max']}%"
+            maturity = bond.get('maturity_date', 'N/A')
+            bonds_table += f"{bond['issuer']} | {bond['rating']} | {yield_range} | {maturity} | {', '.join(platforms)}\n"
+        
+        if len(rating_bonds) > 10:
+            bonds_table += f"\n... and {len(rating_bonds) - 10} more bonds."
+        
+        return {
+            'response_type': 'rating_based_search',
+            'rating': rating,
+            'message': f"Bonds with rating {rating}:\n\nIssuer | Rating | Yield | Maturity | Available at\n-------|--------|-------|----------|------------\n{bonds_table}",
+            'data': rating_bonds.to_dict('records')
+        }
+    
+    def _get_platforms_for_issuer(self, issuer: str) -> List[str]:
+        """Get platforms where bonds from a specific issuer are available"""
+        issuer_bonds = self.finder_db[self.finder_db['issuer'] == issuer]
+        platforms = []
+        
+        # In a real implementation, this would check the platform availability
+        # For this demo, we'll just simulate the availability
+        for platform in self.platforms:
+            if any(issuer_bonds[f'available_on_{platform.lower()}']):
+                platforms.append(platform)
+        
+        return platforms
